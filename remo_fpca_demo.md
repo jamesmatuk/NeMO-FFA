@@ -23,7 +23,7 @@ The first example illustrates Bayesian FPCA using ReMO processes. The second exa
 
 # FPCA using ReMO processes 
 
-The follow code chunk generates noiseless random functions according the observation model in the paper (Equation (7)). That is, $f_i(t) = \mu(t) + \sum_{k = 1}^2\eta_{k,i}\lambda_k(t)$, where $\mu$ denotes the mean process, $\lambda_1,\lambda_2$ are orthogonal functions that represent FPCs, and $\eta_{1,i}\eta_{2,i}$ are FPC scores, $i = 1,\ldots,100$. The FPC scores are standard normal random variables that have been projected to sum to zero, so that the FPCs are not confounded with the mean process. The mean process and FPCs are evaluated on the same common time grid, `time_grid`.
+The follow code chunk generates noiseless random functions according the observation model in the paper (Equation (7)). That is, $f_i(t) = \mu(t) + \eta_{1,i}\lambda_1(t) + \eta_{2,i}\lambda_2(t)$, where $\mu$ denotes the mean process, $\lambda_1,\lambda_2$ are orthogonal functions that represent FPCs, and $\eta_{1,i}\eta_{2,i}$ are FPC scores, $i = 1,\ldots,100$. The FPC scores are standard normal random variables that have been projected to sum to zero, so that the FPCs are not confounded with the mean process. The mean process and FPCs are evaluated on the same common time grid, `time_grid`.
 
 
 
