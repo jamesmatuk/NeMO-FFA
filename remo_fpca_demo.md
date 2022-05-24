@@ -2,9 +2,6 @@
 title: "ReMO FPCA Demonstration"
 author: James Matuk
 date: 2022
-output: 
-  html_document:
-    keep_md: true
 ---
 
 
