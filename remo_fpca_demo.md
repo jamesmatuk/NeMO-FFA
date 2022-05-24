@@ -1,9 +1,5 @@
----
-title: ReMO FPCA Demonstration
-author: James Matuk
-date: 2022
----
-
+# ReMO FPCA Demonstration
+Written by James Matuk (2022)
 
 # Introduction 
 
