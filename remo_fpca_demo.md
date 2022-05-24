@@ -1,5 +1,5 @@
 ---
-title: "ReMO FPCA Demonstration"
+title: ReMO FPCA Demonstration
 author: James Matuk
 date: 2022
 ---
