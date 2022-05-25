@@ -1,5 +1,4 @@
 # ReMO FPCA Demonstration
-Written by James Matuk (2022)
 
 # Introduction 
 
