@@ -38,7 +38,7 @@ W <- diag(w)
 lambda_cur <- matrix(rnorm(M*K),nrow = M,ncol = K)
 eta_cur <- matrix(rnorm(K*N,0,1),nrow = K,ncol = N)
 psi_cur <- rep(1,K)
-sig_sq_cur <- var((y-lambda_cur%*%eta_cur)[obs_grid>0])
+sig_sq_cur <- var((y_common-lambda_cur%*%eta_cur)[obs_grid>0])
 l_mu_cur <- .1
 scale_mu_cur <- 1
 l_param_cur <- rep(.1,K)
