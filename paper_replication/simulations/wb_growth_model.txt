@@ -1,0 +1,22 @@
+model
+{#Start model
+	for (i in 1:N_subj)
+	{#
+	for (t in 1:N_obs)
+		{#
+		W[i,t]~dnorm(m[i,t],taueps)
+		m[i,t]<-xi[i,1]*E[t,1]+xi[i,2]*E[t,2]+xi[i,3]*E[t,3]+
+			xi[i,4]*E[t,4]
+		}#
+	for (j in 1:dim.space)
+		{#
+		xi[i,j]~dnorm(0,ll[j])
+		}#
+	}#
+
+for (i in 1:dim.space)
+	{ll[i]~dgamma(1.0E-3,1.0E-3)
+	 lambda[i]<-1/ll[i]}
+
+taueps~dgamma(1.0E-3,1.0E-3)
+}#End model
