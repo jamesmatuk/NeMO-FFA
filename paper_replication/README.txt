@@ -1,7 +1,7 @@
-This is supplemental material for the paper entitled 'Bayesian
-Functional Principal Components Analysis using Relaxed Mutually Orthogonal Processes'.
-In the 3 directories are code used to replicate the results presented in the paper. 
-Below, we describe the contents of the directories and discuss replication workflow. 
+This is supplemental material for the paper entitled 'Bayesian modeling of nearly 
+mutually orthogonal processes'. In the 3 directories are code used to replicate the 
+results presented in the paper. Below, we describe the contents of the directories 
+and discuss replication workflow. 
 
 /cebu_data_analysis - 
 
@@ -61,15 +61,15 @@ model. The seed is set for the MCMC algorithm for reproducibility.
 
  file descriptions:
 
-  bfpca_simulation.R - This script replicates the simulation experiment performed in Section 
+  bffa_simulation.R - This script replicates the simulation experiment performed in Section 
 4.2 of the main paper.
 
-  fpca_growth_simulation.R - This script replicates the simulation experiment performed in Appendix E.  
+  ffa_growth_simulation.R - This script replicates the simulation experiment performed in Appendix E.  
 
-  fpca_reg_simulation.R - This script replicates the simulation experiment performed in Section 
+  ffa_reg_simulation.R - This script replicates the simulation experiment performed in Section 
 4.3 of the main paper. 
 
-  fpca_simulation.R - This script replicates the simulation experiment performed in Section 
+  ffa_simulation.R - This script replicates the simulation experiment performed in Section 
 4.1 of the main paper. 
 
   lambda_prior_study.R - This script replicates the prior illustration in Section 2.2.
@@ -77,18 +77,18 @@ model. The seed is set for the MCMC algorithm for reproducibility.
   nu_sensitivity_study.R - This script replicates the simulation experiment performed in 
 Appendix C. 
 
-  wb_growth_model.txt - This is a WinBUGS model file that is called within the fpca_growth_simulation.R script.
+  wb_growth_model.txt - This is a WinBUGS model file that is called within the ffa_growth_simulation.R script.
 
-  wb_model.txt - This is a WinBUGS model file that is called within the fpca_simulation.R script.
+  wb_model.txt - This is a WinBUGS model file that is called within the ffa_simulation.R script.
 
-  wb_reg_model.txt - This is a WinBUGS model file that is called within the fpca_reg_simulation.R script.
+  wb_reg_model.txt - This is a WinBUGS model file that is called within the ffa_reg_simulation.R script.
  
  workflow: To succesfully run the code in this directory, the directory will need to be 
 the current working directory in the user's R session. 
 
-The scripts bfpca_simulation.R, fpca_reg_simulation.R, and fpca_simulation.R can all be ran to 
+The scripts bffa_simulation.R, ffa_reg_simulation.R, and ffa_simulation.R can all be ran to 
 replicate the results in section 4.2, 4.3, and 4.1 of the main paper respecively. The script 
-fpca_growth_simulation.R can be ran to replicate the results in Appendix E. Each script
+ffa_growth_simulation.R can be ran to replicate the results in Appendix E. Each script
 begins with generating replicates of simulated datasets, fitting competing models on the same 
 generated dataset, and concluding with illustrating the performance othe competing methods. 
 A user can select whether they want to replicate the simulation experiment in a 
@@ -96,7 +96,7 @@ A user can select whether they want to replicate the simulation experiment in a
 set for the replication experiments for reproducibility. 
 
 
-The fpca_growth_simulation.R, fpca_reg_simulation.R and fpca_simulation.R scripts call the WinBUGS 
+The ffa_growth_simulation.R, ffa_reg_simulation.R and ffa_simulation.R scripts call the WinBUGS 
 model files: wb_growth_model.txt wb_reg_model.txt and wb_model.txt. It is assumed that WinBUGS is 
 installed in the directory: "c:/Program Files/WinBUGS14/".If this is not the case, then the user 
 must specify the correct location of WinBUGS. 
@@ -114,6 +114,6 @@ The seed is set for the replication experiments for reproducibility.
   msf.cpp - This c++ file has functions used to resolve label switching and sign ambiguity
 in MCMC samples.
 
-  remo_fpca.cpp - This c++ file has functions used in steps of MCMC algorithms presented in the paper. 
+  nemo_ffa.cpp - This c++ file has functions used in steps of MCMC algorithms presented in the paper. 
 
  workflow: These files contain functions that are used to speed up the MCMC implementation in R. 
