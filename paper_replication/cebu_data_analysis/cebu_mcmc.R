@@ -8,7 +8,7 @@ library(splines)
 
 ##### Import data #####
 
-sourceCpp("../src/remo_fpca.cpp")
+sourceCpp("../src/nemo_ffa.cpp")
 cebu_long <- read_dta("data/mlong.dta")
 cebu_mort <- read_dta("data/mmort.dta")
 cebu_birth <- read_dta("data/mbirth2.dta")

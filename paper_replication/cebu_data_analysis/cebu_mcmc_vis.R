@@ -7,7 +7,7 @@ library(ggplot2)
 library(splines)
 
 ##### Import data #####
-sourceCpp("../src/remo_fpca.cpp")
+sourceCpp("../src/nemo_ffa.cpp")
 cebu_long <- read_dta("data/mlong.dta")
 cebu_mort <- read_dta("data/mmort.dta")
 cebu_birth <- read_dta("data/mbirth2.dta")
@@ -471,7 +471,7 @@ for(k in 1:K){
 }
 
 
-# posterior means for FPC scores
+# posterior means for latent factors
 library(GGally)
 xi_post_mean <- apply(xi_save_processed,c(1,2),mean)
 xi_df <- as.data.frame(t(xi_post_mean))
@@ -529,7 +529,7 @@ for(cov_ind in 1:4){
   if(im_save){dev.off()}
 }
 
-##### binary FPCA for breastfeeding #####
+##### binary FFA for breastfeeding #####
 
 mu_save <- mcmc_output$mu_bf_save 
 scale_mu_save <- mcmc_output$scale_mu_bf_save
@@ -958,7 +958,7 @@ for(cov_ind in 1:num_covs){
 
 fit_save <- array(0,dim = c(M,N,n_iter))
 for(iter in 1:n_iter){
-    # fpca regression
+    # latent factor regression
     fit_save[,,iter] <- mcmc_output$mu_y_save[,iter]%*%t(rep(1,N)) + mcmc_output$lambda_y_save[,,iter]%*%mcmc_output$eta_y_save[,,iter] 
     # historical regression
     z_bf_complete <- sample_z_complete(z_bf, mcmc_output$mu_bf_save[,iter]%*%t(rep(1,N)) + mcmc_output$lambda_bf_save[,,iter]%*%mcmc_output$eta_bf_save[,,iter],obs_grid_bf)
@@ -1140,7 +1140,7 @@ fit_save <- array(0,dim = c(M,N,n_iter))
 grid_weight <- diff(c(age_grid[1],(age_grid[2:M]+age_grid[1:(M-1)])/2,age_grid[M]))
 grid_weight <- diag(grid_weight)
 for(iter in 1:n_iter){
-  # fpca regression
+  # latent factor regression
   fit_save[,,iter] <- mcmc_output$mu_y_save[,iter]%*%t(rep(1,N)) + mcmc_output$lambda_y_save[,,iter]%*%mcmc_output$eta_y_save[,,iter] 
   # historical regression
   z_bf_complete <- sample_z_complete(z_bf, mcmc_output$mu_bf_save[,iter]%*%t(rep(1,N)) + mcmc_output$lambda_bf_save[,,iter]%*%mcmc_output$eta_bf_save[,,iter],obs_grid_bf)
