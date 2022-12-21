@@ -1,12 +1,4 @@
----
-title: "NeMO Processes Demonstration"
-author: James Matuk
-date: 2022
-output: 
-  html_document:
-    keep_md: true
----
-
+# NeMO Processes Demonstration 
 
 # Introduction 
 
