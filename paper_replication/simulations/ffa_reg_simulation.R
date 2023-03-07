@@ -3,21 +3,28 @@ library(pracma)
 library(fdapace)
 library(fpca)
 library(Rcpp)
+library(SemiPar)
+library(rootSolve)
+library(reshape2)
 library(R2WinBUGS)
 
 sourceCpp("../src/nemo_ffa.cpp")
+sourceCpp("../src/msf.cpp")
+source("../src/nemo_ffa.R")
+source("./supp_funs/fpca_funs.R")
+
+# noise setting - either "low" or "high"
+noise_setting <- "high"
 
 set.seed(1234)
 
 n_rep <- 100
 M <- 30
 N <- 100
-f_save <- array(0,dim = c(M,N,n_rep))
 y_long_save <- list()
 y_long_count <- 1
-lambda_true_save <- array(0,dim = c(M,n_rep))
-x_save <- array(0,dim = c(N,n_rep))
-b_true_save <- array(0,dim = c(n_rep))
+one_N <- rep(1,N)
+b_true_save <- rep(1,n_rep)
 
 
 covered_mat <- array(NA,dim = c(3,4,n_rep))
@@ -31,8 +38,8 @@ for(replicate in 1:n_rep){
   lambda_scale <- 1*rep(1,K_true)
   mu_l <- .4
   mu_scale <- 1
-  sig_true <- .5 # low noise
-  #sig_true <- 1 # high noise
+  if(noise_setting == "low"){sig_true <- .5}
+  if(noise_setting == "high"){sig_true <- 1}
   
   ##### generate underlying observations #####
   
@@ -49,20 +56,18 @@ for(replicate in 1:n_rep){
   lambda_norm <- sqrt(t(lambda_true)%*%W%*%lambda_true)
   lambda_true <- lambda_true/as.numeric(lambda_norm)
   
-  xi_true <- matrix(rnorm(K_true*N),nrow = K_true,ncol = N)
+  nu_eta <- 1e-4
+  xi_cov <- diag(one_N) - one_N%*%t(one_N)/(nu_eta + N)
+  xi_true <- mvrnorm(K_true,mu = rep(0,N),Sigma = xi_cov)
   x <- rnorm(N)
   b_true <- rnorm(1)
+  b_true_save[replicate] <- b_true
   eta_true <- t(x)*b_true + xi_true
   
   f <- mu_true%*%t(rep(1,N)) + lambda_true%*%eta_true
   noise <- matrix(rnorm(N*M,0,sig_true),nrow = M,ncol = N)
   y <- f + noise
-  
-  f_save[,,replicate] <- f
-  lambda_true_save[,replicate] <- lambda_true
-  x_save[,replicate] <- x
-  b_true_save[replicate] <- b_true
-  
+
   for(sparsity_ind in 1:3){
     sparsity_level <- sparsity_levels[sparsity_ind]
     
@@ -84,89 +89,93 @@ for(replicate in 1:n_rep){
     y_long_save[[y_long_count]] <- y_long
     y_long_count <- y_long_count + 1 
     
-    ##### Run MCMC #####
+    ##### setup MCMC #####
 
     w <- diff(c(time[1],(time[2:M]+time[1:(M-1)])/2,time[M]))
     W <- diag(w)
     
     N <- dim(y_common)[2]
-    K <- 2
     Q <- 1
     one_vec_N <- rep(1,N)
+    
+    K_max <- 5
     nu_eta <- 1e-4
-    nu_param <- 1e-4
+    nu_lambda <- 1e-4
     
-    prior_a <- 12
-    prior_b <- 4
+    inv_g_hyper <- length_scale_hyper(time)
+    prior_a <- inv_g_hyper[1]
+    prior_b <- inv_g_hyper[2]
     prior_var <- 1
+    n_iter <- 1000
+    init_mcmc_params <- init_ffa_mcmc(y_common,obs_grid,time,
+                                      K_max,nu_eta,nu_lambda,
+                                      prior_a,prior_b,prior_var,
+                                      n_iter)
+    K_nemo <- dim(init_mcmc_params$lambda_cur)[2]
     
-    age_grid <- time
-    M <- length(age_grid)
-    w <- diff(c(age_grid[1],(age_grid[2:M]+age_grid[1:(M-1)])/2,age_grid[M]))
-    W <- diag(w)
-    
-    #lambda_cur <- matrix(rnorm(M*K),nrow = M,ncol = K)
-    lambda_cur <- matrix(0,nrow = M,ncol = K)
-    xi_cur <- matrix(rnorm(K*N,0,1),nrow = K,ncol = N)
-    b_cur <- matrix(rnorm(K*Q,0,1),nrow = K,ncol = Q)
-    eta_cur <- b_cur%*%x + xi_cur
-    psi_cur <- rep(1,K)
-    sig_sq_cur <- var((y_common-lambda_cur%*%eta_cur)[obs_grid>0])
-    l_mu_current <- 1
-    scale_mu_current <- 1
-    l_param_cur <- rep(1,K)
-    scale_param_cur <- rep(1,K)
+    lambda_cur <- init_mcmc_params$lambda_cur
+    eta_cur <- init_mcmc_params$eta_cur
+    eta_lm <- lm(t(eta_cur) ~ -1 + x)
+    b_cur <- t(coef(eta_lm))
+    xi_cur <- t(resid(eta_lm))
+
+    psi_cur <- init_mcmc_params$psi_cur
+    sig_sq_cur <- init_mcmc_params$sig_sq_cur
+    l_mu_current <- init_mcmc_params$l_mu_cur
+    scale_mu_current <-  init_mcmc_params$scale_mu_cur
+    l_param_cur <-  init_mcmc_params$l_param_cur
+    scale_param_cur <- init_mcmc_params$scale_param_cur
     
     # pre-specify proposal kernel parameters
-    proposal_l_mu <- .0001
-    proposal_scale_mu <- .0001
-    proposal_l <- rep(.001,K)
-    proposal_scale <- rep(.001,K)
+    proposal_l_mu <- init_mcmc_params$proposal_l_mu
+    proposal_scale_mu <- init_mcmc_params$proposal_scale_mu
+    proposal_l <- init_mcmc_params$proposal_l
+    proposal_scale <- init_mcmc_params$proposal_scale
     accept_l_mu_count <- 0
     accept_scale_mu_count <- 0
-    accept_l_count <- rep(0,K)
-    accept_scale_count <- rep(0,K)
+    accept_l_count <- rep(0,K_nemo)
+    accept_scale_count <- rep(0,K_nemo)
     
     # pre-allocate memory for MCMC samples
-    n_iter <- 20000
-    lag <- 20
+    n_iter <- 10000
+    lag <- 10
     n_save <- n_iter/lag
     mu_save <- matrix(0,nrow = M,ncol = n_save)
     scale_mu_save <- rep(0,n_save)
     l_mu_save <- rep(0,n_save)
-    lambda_save <- array(0,dim = c(M,K,n_save))
-    xi_save <- array(0,dim = c(K,N,n_save))
-    b_save <- array(0,dim = c(K,Q,n_save))
-    eta_save <- array(0,dim = c(K,N,n_save))
-    psi_save <- array(0,dim = c(K,n_save))
-    l_param_save <- array(0,dim = c(K,n_save))
-    scale_param_save <- array(0,dim = c(K,n_save))
+    lambda_save <- array(0,dim = c(M,K_nemo,n_save))
+    xi_save <- array(0,dim = c(K_nemo,N,n_save))
+    b_save <- array(0,dim = c(K_nemo,Q,n_save))
+    eta_save <- array(0,dim = c(K_nemo,N,n_save))
+    psi_save <- array(0,dim = c(K_nemo,n_save))
+    l_param_save <- array(0,dim = c(K_nemo,n_save))
+    scale_param_save <- array(0,dim = c(K_nemo,n_save))
     sig_sq_save <- rep(0,n_save)
-    
+    ##### Run MCMC #####
     for(iter in 1:n_iter){
       
       y_st_cur <- compute_y_st(y_common,lambda_cur%*%eta_cur,obs_grid)
-      mu_cur <- sample_mu_sparse(y_st_cur, sig_sq_cur, age_grid, l_mu_current,scale_mu_current,obs_grid)
+      mu_cur <- sample_mu_sparse(y_st_cur, sig_sq_cur, time, l_mu_current,scale_mu_current,obs_grid)
       
-      out <- l_mu_MH(y_st_cur,age_grid,obs_grid,l_mu_current,scale_mu_current,mu_cur,sig_sq_cur,proposal_l_mu,1,iter,prior_a,prior_b) 
+      out <- l_mu_MH(y_st_cur,time,obs_grid,l_mu_current,scale_mu_current,mu_cur,sig_sq_cur,proposal_l_mu,1,iter,prior_a,prior_b) 
       l_mu_current <- out[1]
       accept_l_mu_count <- accept_l_mu_count + out[2]
       proposal_l_mu <- out[3]
       
-      out <- scale_mu_MH(y_st_cur, age_grid,obs_grid,l_mu_current, scale_mu_current,mu_cur,sig_sq_cur,proposal_scale_mu,1,iter,prior_var)
+      out <- scale_mu_MH(y_st_cur, time,obs_grid,l_mu_current, scale_mu_current,mu_cur,sig_sq_cur,proposal_scale_mu,1,iter,prior_var)
       scale_mu_current<- out[1]
       accept_scale_mu_count <- accept_scale_mu_count + out[2]
       proposal_scale_mu<- out[3]
       
       y_st_cur <- compute_y_st(y_common,mu_cur%*%t(one_vec_N),obs_grid)
-      lambda_cur <- sample_lambda_sparse(y_st_cur,W,age_grid,l_param_cur,scale_param_cur,lambda_cur,eta_cur,sig_sq_cur,nu_param,obs_grid)
+      lambda_cur <- sample_lambda_sparse(y_st_cur,W,time,l_param_cur,scale_param_cur,lambda_cur,eta_cur,sig_sq_cur,nu_lambda,obs_grid)
       
-      out <- l_param_MH(l_param_cur,proposal_l,scale_param_cur,age_grid,obs_grid,W,y_st_cur,lambda_cur,eta_cur,sig_sq_cur,nu_param,1,iter,prior_a,prior_b)
+      out <- l_param_MH(l_param_cur,proposal_l,scale_param_cur,time,obs_grid,W,y_st_cur,lambda_cur,eta_cur,sig_sq_cur,nu_lambda,1,iter,prior_a,prior_b)
       l_param_cur <- out[,1]
       accept_l_count <- accept_l_count + out[,2]
       proposal_l <- out[,3]
       
-      out <- scale_param_MH(scale_param_cur,proposal_scale,l_param_cur,age_grid,obs_grid,W,y_st_cur,lambda_cur,eta_cur,sig_sq_cur,nu_param,1,iter,prior_var)
+      out <- scale_param_MH(scale_param_cur,proposal_scale,l_param_cur,time,obs_grid,W,y_st_cur,lambda_cur,eta_cur,sig_sq_cur,nu_lambda,1,iter,prior_var)
       scale_param_cur <- out[,1]
       accept_scale_count <- accept_scale_count + out[,2]
       proposal_scale <- out[,3]
@@ -175,11 +184,11 @@ for(replicate in 1:n_rep){
       xi_cur <- sample_eta_cholupdate(y_st_cur,xi_cur,psi_cur,lambda_cur,sig_sq_cur,nu_eta,obs_grid)
       
       y_st_cur <- compute_y_st(y_common,mu_cur%*%t(one_vec_N) + lambda_cur%*%xi_cur,obs_grid)  
-      b_cur <- sample_b(y_st_cur,t(as.matrix(x)),b_cur,lambda_cur,psi_cur,sig_sq_cur,obs_grid)
+      b_cur <- sample_b(y_st_cur,t(x),b_cur,lambda_cur,psi_cur,sig_sq_cur,obs_grid)
       
       eta_cur <- b_cur%*%x + xi_cur
       
-      psi_cur <- sample_psi_regression(xi_cur,b_cur,nu_eta,11,10)
+      psi_cur <- sample_psi_regression(xi_cur,b_cur,nu_eta,.001,.001)
       
       y_st_cur <- compute_y_st(y_common,mu_cur%*%t(one_vec_N),obs_grid)
       sig_sq_cur <- sample_sig_sq_sparse(y_st_cur,lambda_cur,eta_cur,obs_grid)
@@ -219,6 +228,8 @@ for(replicate in 1:n_rep){
     }
     ortho_ci <- as.numeric(quantile(b_processed[(n_save/2):n_save],probs = c(.025,.975)))
     
+    print(plot(b_processed))
+    
     ##### Run PACE #####
     
     Ly <- list()
@@ -253,11 +264,7 @@ for(replicate in 1:n_rep){
     
     pace_lm <- lm(xi_est ~ x + 0)
     pace_ci <- as.numeric(confint(pace_lm))
-    
-    #plot(xi_est,eta_true)
-    #print(b_true)
-    #print(pace_ci)
-    
+  
     ##### Peng and Paul FPCA #####
     tryCatch({ # There are sometimes when this code throws an error
       fpca_data <- cbind(y_long[,1],y_long[,3],y_long[,2]/2)
@@ -310,6 +317,7 @@ for(replicate in 1:n_rep){
       covered_mat[sparsity_ind,2,replicate] <- b_true > fpca_ci[1] & b_true < fpca_ci[2]
     },error = function(cond){covered_mat[sparsity_ind,2,replicate] <- NA})
     
+    # using winbugs
     
     time_grid <- sort(unique(y_long[,2]))
     M <- length(time_grid)
@@ -405,15 +413,15 @@ for(replicate in 1:n_rep){
 }
 
 ##### visualize simulation results #####
-
+noise_setting <- "high"
 covered_proportion <- apply(covered_mat,c(1,2),mean)
 
-method_fact <- factor(c(rep("NeMO",3),rep("Newton",3),rep("PACE",3),rep("CG",3)),levels = c("NeMO","Newton","PACE","CG"))
+method_fact <- factor(c(rep("NeMO",3),rep("PP2009",3),rep("YMW2005",3),rep("CG2010",3)),levels = c("NeMO","PP2009","YMW2005","CG2010"))
 mean_df = data.frame(method = method_fact,value = c(covered_proportion))
 
 sparsity_levels <- c(.25,.5,.75)
 yl <- c(min(mean_df$value),1)
 ggplot(mean_df) + geom_line(aes(x = rep(sparsity_levels,4),y = value,color = method),size = 2) + 
   geom_hline(yintercept = .95,linetype = 'dashed') + 
-  ylab("coverage") + xlab("sparsity level") + ylim(yl) + theme(text = element_text(size = 24))+
+  ylab("coverage") + xlab("sparsity level") + ylim(yl) + theme(text = element_text(size = 28))+
   scale_x_continuous(breaks = sparsity_levels)

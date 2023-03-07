@@ -5,10 +5,14 @@ library(boot)
 library(SLFPCA)
 library(fda)
 
-
 sourceCpp("../src/nemo_ffa.cpp")
-sourceCpp("./registr_funs/registr_src.cpp")
-source("./registr_funs/registr_funs.R")
+source("../src/nemo_ffa.R")
+sourceCpp("../src/msf.cpp")
+sourceCpp("./supp_funs/registr_src.cpp")
+source("./supp_funs/registr_funs.R")
+
+# scale setting - either "low" or "high"
+scale_setting <- "high"
 
 ##### Parameters that can be varied for simulation experiments #####
 
@@ -16,6 +20,7 @@ set.seed(1234)
 
 n_rep <- 100
 MISE_mat <- array(0,dim = c(3,3,n_rep))
+K_nemo <- array(0,dim = c(3,n_rep))
 sparsity_levels <- c(.25,.5,.75)
 for(replicate in 1:n_rep){
 
@@ -24,14 +29,14 @@ K_true <- 2
 lambda_l <- .4*rep(1,K_true)
 lambda_scale <- 1*rep(1,K_true)
 mu_l <- .4
-mu_scale <- 1 # low variability
-# mu_scale <- 1 # high variability
-
+mu_scale <- 1 
 sig_true <- 1
 
 ##### generate underlying observations #####
 
 M <- 30 
+one_M <- rep(1,M)
+one_N <- rep(1,N)
 time <- seq(0,2,length.out = M)
 w <- diff(c(time[1],(time[2:M]+time[1:(M-1)])/2,time[M]))
 W <- diag(w)
@@ -55,13 +60,28 @@ for(iter in 1:1000){
   }
 }
 
-eta_true <- matrix(rnorm(K_true*N),nrow = K_true,ncol = N)
+nu_eta <- 1e-4
+eta_cov <- diag(one_N) - one_N%*%t(one_N)/(nu_eta + N)
+eta_true <- mvrnorm(K_true,mu = rep(0,N),Sigma = eta_cov)
+eta_sd <- sqrt(apply(eta_true,1,var))
+
+lambda_true <- lambda_true*(one_M%*%t(eta_sd))
+eta_true <- eta_true/(eta_sd%*%t(one_N))
+
+lambda_norm <- sqrt(diag(t(lambda_true)%*%W%*%lambda_true))
+if(scale_setting == "low"){lambda_scale <- c(2,1)}
+if(scale_setting == "high"){lambda_scale <- c(3,1.5)}
+
+lambda_true <- lambda_true*(one_M%*%t(lambda_scale/lambda_norm))
+
+lambda_norm_order <- order(lambda_norm,decreasing = T)
+lambda_true <- lambda_true[,lambda_norm_order]
+eta_true <- eta_true[lambda_norm_order,]
 
 f <- mu_true%*%t(rep(1,N)) + lambda_true%*%eta_true
 f_prob <- pnorm(f)
 y <- f + matrix(rnorm(N*M,0,sig_true),nrow = M,ncol = N)
 z <- apply(y>0,2,as.numeric)
-
 
 for(sparsity_ind in 1:3){
 sparsity_level <-sparsity_levels[sparsity_ind]
@@ -90,12 +110,12 @@ for(i in 1:N){
   Lt[[i]] <- time[inds_obs]
 }
 
-slfpca_results <- SLFPCA(Ly,Lt,interval = c(min(time),max(time)),npc = 5, L_list = 13,
+slfpca_results <- SLFPCA(Ly,Lt,interval = c(min(time),max(time)),npc = 2, L_list = 13,
                          norder = 4, kappa_theta = 0.2, sparse_pen = 0,
                          nRegGrid = length(time), stepmu = 0.005)
 
 slfpca_mu <- eval.fd(time,slfpca_results$mufd)
-K <- 5
+K <- K_true
 slfpca_eig_vec <- array(0,dim = c(M,K)) 
 for(k in 1:K){
   slfpca_eig_vec[,k] <- eval.fd(time,slfpca_results$eigfd_list[[k]])
@@ -107,115 +127,53 @@ fit_slfpca <- inv.logit(slfpca_mu%*%t(rep(1,N)) + slfpca_eig_vec%*%t(slfpca_scor
 
 ##### run bfpca from the registr package #####
 z_bfpca <- data.frame(id = z_long[,1], value = z_long[,3],index = z_long[,2],4)
-bfpca_results <- bfpca2(z_bfpca,npc = 5)
+bfpca_results <- bfpca2(z_bfpca,npc = 2)
 
 fit_bfpca <- inv.logit(bfpca_results$mu%*%t(rep(1,N)) + bfpca_results$efunctions%*%t(bfpca_results$scores))
-
 ##### nemo bffa #####
+K_max <- 5
 
-K <- 5
-N <- dim(z_common)[2]
-one_vec_N <- rep(1,N)
 nu_eta <- 1e-4
-nu_param <- 1e-4
-
-age_grid <- time
-M <- length(age_grid)
-w <- diff(c(age_grid[1],(age_grid[2:M]+age_grid[1:(M-1)])/2,age_grid[M]))
-W <- diag(w)
-
-prior_a <- 12
-prior_b <- 4
+nu_lambda <- 1e-4
+inv_g_hyper <- length_scale_hyper(time)
+prior_a <- inv_g_hyper[1]
+prior_b <- inv_g_hyper[2]
 prior_var <- 1
-
-mu_cur <- rep(0,M)
-lambda_cur <- matrix(0,nrow = M,ncol = K)
-eta_cur <- matrix(rnorm(K*N,0,1),nrow = K,ncol = N)
-psi_cur <- rep(1,K)
-sig_sq_cur <- 1
-l_mu_current <- 1
-scale_mu_current <- 1
-l_param_cur <- rep(1,K)
-scale_param_cur <- rep(1,K)
-
-# pre-specify proposal kernel parameters
-proposal_l_mu <- .0001
-proposal_scale_mu <- .0001
-proposal_l <- rep(.001,K)
-proposal_scale <- rep(.001,K)
-accept_l_mu_count <- 0
-accept_scale_mu_count <- 0
-accept_l_count <- rep(0,K)
-accept_scale_count <- rep(0,K)
-
-# pre-allocate memory for MCMC samples
 n_iter <- 1000
-lag <- 1
-n_save <- n_iter/lag
-mu_save <- matrix(0,nrow = M,ncol = n_save)
-scale_mu_save <- rep(0,n_save)
-l_mu_save <- rep(0,n_save)
-lambda_save <- array(0,dim = c(M,K,n_save))
-eta_save <- array(0,dim = c(K,N,n_save))
-psi_save <- array(0,dim = c(K,n_save))
-l_param_save <- array(0,dim = c(K,n_save))
-scale_param_save <- array(0,dim = c(K,n_save))
-sig_sq_save <- rep(0,n_save)
 
+init_mcmc_params <- init_bffa_mcmc(z_common,obs_grid,time,
+                                   K_max,nu_eta,nu_lambda,
+                                   prior_a,prior_b,prior_var,
+                                   n_iter)
 
-for(iter in 1:n_iter){
+if(dim(init_mcmc_params$lambda_cur)[2] == 0){
   
-  # first sample latent continuous variables that underly binary response
-  z_latent_cur <- sample_z_latent(z_common,mu_cur%*%t(one_vec_N) +lambda_cur%*%eta_cur,obs_grid)
-  
-  # sampler mean
-  z_star_cur <- compute_y_st(z_latent_cur,lambda_cur%*%eta_cur,obs_grid)
-  mu_cur <- sample_mu_sparse(z_star_cur, sig_sq_cur, age_grid, l_mu_current,scale_mu_current,obs_grid)
-  
-  out <- l_mu_MH(z_star_cur,age_grid,obs_grid,l_mu_current,scale_mu_current,mu_cur,sig_sq_cur,proposal_l_mu,1,iter,prior_a,prior_b) 
-  l_mu_current <- out[1]
-  accept_l_mu_count <- accept_l_mu_count + out[2]
-  proposal_l_mu <- out[3]
-  
-  out <- scale_mu_MH(z_star_cur, age_grid,obs_grid,l_mu_current, scale_mu_current,mu_cur,sig_sq_cur,proposal_scale_mu,1,iter,prior_var)
-  scale_mu_current<- out[1]
-  accept_scale_mu_count <- accept_scale_mu_count + out[2]
-  proposal_scale_mu<- out[3]
-  
-  z_star_cur <- compute_y_st(z_latent_cur,mu_cur%*%t(one_vec_N),obs_grid)
-  lambda_cur <- sample_lambda_sparse(z_star_cur,W,age_grid,l_param_cur,scale_param_cur,lambda_cur,eta_cur,sig_sq_cur,nu_param,obs_grid)
-  
-  out <- l_param_MH(l_param_cur,proposal_l,scale_param_cur,age_grid,obs_grid,W,z_star_cur,lambda_cur,eta_cur,sig_sq_cur,nu_param,1,iter,prior_a,prior_b)
-  l_param_cur <- out[,1]
-  accept_l_count <- accept_l_count + out[,2]
-  proposal_l <- out[,3]
-  
-  out <- scale_param_MH(scale_param_cur,proposal_scale,l_param_cur,age_grid,obs_grid,W,z_star_cur,lambda_cur,eta_cur,sig_sq_cur,nu_param,1,iter,prior_var)
-  scale_param_cur <- out[,1]
-  accept_scale_count <- accept_scale_count + out[,2]
-  proposal_scale <- out[,3]
-  
-  eta_cur <- sample_eta_cholupdate(z_star_cur,eta_cur,psi_cur,lambda_cur,sig_sq_cur,nu_eta,obs_grid)
-  psi_cur <- sample_psi_sparse(eta_cur,nu_eta,11,10)
-  
-  if(iter%%lag == 0){
-    iter_save <- iter/lag
-    mu_save[,iter_save] <- mu_cur
-    scale_mu_save[iter_save] <- scale_mu_current
-    l_mu_save[iter_save] <- l_mu_current
-    lambda_save[,,iter_save] <- lambda_cur
-    eta_save[,,iter_save] <- eta_cur
-    psi_save[,iter_save] <- psi_cur
-    l_param_save[,iter_save] <- l_param_cur
-    scale_param_save[,iter_save] <- scale_param_cur
-    sig_sq_save[iter_save] <- sig_sq_cur  
-  }
-  
+  init_mcmc_params$lambda_cur <- matrix(0,nrow = M,ncol = 1)
+  init_mcmc_params$eta_cur <- matrix(rnorm(K*N,0,1),nrow = 1,ncol = N)
+  init_mcmc_params$psi_cur <- rep(1,1)
+  init_mcmc_params$l_param_cur <- rep(.1,1)
+  init_mcmc_params$scale_param_cur <- rep(1,1)
+  init_mcmc_params$proposal_l <- rep(.001,1)
+  init_mcmc_params$proposal_scale <- rep(.001,1)
 }
+
+lag <- 1
+bffa_mcmc <- run_bffa_mcmc(z_common,obs_grid,time,nu_eta,nu_lambda,
+                           init_mcmc_params,prior_a,prior_b,prior_var,n_iter,lag)
+
+
+
+
+K_nemo[sparsity_ind,replicate] <- dim(init_mcmc_params$lambda_cur)[2]
 
 fit_save <- array(0,dim = c(M,N,n_iter/2))
 for(iter in (n_iter/2 + 1):n_iter){
-  fit_save[,,iter - n_iter/2] <- pnorm(mu_save[,iter]%*%t(one_vec_N) + lambda_save[,,iter]%*%eta_save[,,iter])
+  if(K_nemo[sparsity_ind,replicate] == 1){
+    fit_save[,,iter - n_iter/2] <- pnorm(bffa_mcmc$mu_save[,iter]%*%t(rep(1,N)) + bffa_mcmc$lambda_save[,,iter]%*%t(bffa_mcmc$eta_save[,,iter]))
+  }else{
+    fit_save[,,iter - n_iter/2] <- pnorm(bffa_mcmc$mu_save[,iter]%*%t(rep(1,N)) + bffa_mcmc$lambda_save[,,iter]%*%bffa_mcmc$eta_save[,,iter])  
+  }
+  
 }
 fit_mean <- apply(fit_save,c(1,2),mean)
 
@@ -232,26 +190,48 @@ MISE_mat[sparsity_ind,3,replicate] <- mean(l2_loss_slfpca)
 }
 
 print(replicate)
+print(K_nemo[,replicate])
 print(MISE_mat[,,replicate])
 
 }
 
 ##### Visualize results of simulation #####
+cube_diff <- function(cube_array){
+  diff_array <- array(0,dim= c(3,2,100))
+  for(method in 1:2){
+    diff_array[,method,] <- cube_array[,1+method,] - cube_array[,1,]
+  }
+  return(diff_array)
+}
 
-MISE_mean <- apply(MISE_mat,c(1,2),mean)
-MISE_sd <- apply(MISE_mat,c(1,2),sd)
-MISE_lower<- MISE_mean - 1.96*MISE_sd/sqrt(dim(MISE_mat)[3])
-MISE_upper<- MISE_mean + 1.96*MISE_sd/sqrt(dim(MISE_mat)[3])
+reorg_results <- function(cube_array){
+  s_levels <- c(.25,.5,.75)
+  m_levels <- c("WZSG2019","ZLLZ2021")
+  long_rep <- NULL
+  long_s <- NULL
+  long_m <- NULL
+  long_value <- NULL
+  for(s_ind in 1:3){
+    for(m_ind in 1:2){
+      long_rep <- c(long_rep,1:100)
+      long_s <- c(long_s,rep(s_levels[s_ind],100))
+      long_m <- c(long_m,rep(m_levels[m_ind],100))
+      long_value <- c(long_value,cube_array[s_ind,m_ind,])
+    }
+  }
+  long_df <- data.frame(replicate = long_rep,sparsity = long_s,method = long_m,value = long_value)
+  return(long_df)
+}
 
-method_fact <- factor(c(rep("NeMO",3),rep("registr",3),rep("SLFPCA",3)),levels = c("NeMO","registr","SLFPCA"))
-mean_df = data.frame(method = method_fact,value = c(MISE_mean))
-lower_df = data.frame(method = method_fact,value = c(MISE_lower))
-upper_df = data.frame(method = method_fact,value = c(MISE_upper))
+temp_df <- reorg_results(cube_diff(MISE_mat))
+scale_breaks <- round(seq(0,quantile(temp_df$value, c(0.95)),length.out = 4),2)
+scale_labels <- as.character(scale_breaks)  
+scale_labels[1] <- "NeMO"
 
-sparsity_levels <- c(.25,.5,.75)
-yl <- c(min(MISE_lower),max(MISE_upper))
-ggplot(mean_df) + geom_line(aes(x = rep(sparsity_levels,3),y = value,color = method),size = 2) + 
-  geom_ribbon(mapping = aes(x = rep(sparsity_levels,3),ymin = lower_df$value,ymax = upper_df$value ,fill = method),alpha = .2) + 
-  ylab("MISE") + xlab("sparsity level") + ylim(yl) + theme(text = element_text(size = 24))+
-  scale_x_continuous(breaks = sparsity_levels)
-
+png(file=paste0('bffa_sim_',scale_setting,'.png'), width=400, height=400)
+print(
+ggplot(temp_df) + geom_boxplot(aes(x = as.factor(sparsity),y = value,color = method),outlier.shape = NA) +
+  scale_y_continuous(limits = c(0,quantile(temp_df$value, c(0.95))),breaks = scale_breaks,labels = scale_labels) +
+  geom_hline(yintercept = 0,linetype = "dashed",size = 1)+ ylab("MISE") + xlab("sparsity level") + theme(text = element_text(size = 24)) + ggtitle(expression(h(f)))
+)
+dev.off()

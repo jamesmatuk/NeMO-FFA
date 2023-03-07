@@ -4,31 +4,47 @@ library(fdapace)
 library(fpca)
 library(Rcpp)
 library(SemiPar)
+library(rootSolve)
+library(reshape2)
+library(R2WinBUGS)
+library(ggpubr)
+library(grid)
 
+sourceCpp("../src/nemo_ffa.cpp")
+sourceCpp("../src/msf.cpp")
+source("../src/nemo_ffa.R")
+source("./supp_funs/fpca_funs.R")
 
-sourceCpp("../src/nemo.cpp")
+# noise setting - either "low" or "high"
+noise_setting <- "high"
 
 set.seed(1234)
 
-n_rep <- 5
+n_rep <- 100
 M <- 30
+N <- 100
+one_M <- rep(1,M)
+one_N <- rep(1,N)
+
 y_long_save <- list()
 y_long_count <- 1
 
-MISE_mat <- array(NA,dim = c(3,4,n_rep))
+mu_MISE <- array(NA,dim = c(3,4,n_rep))
+lambda_1_MISE <- array(NA,dim = c(3,4,n_rep))
+lambda_2_MISE <- array(NA,dim = c(3,4,n_rep))
+est_MISE <- array(NA,dim = c(3,4,n_rep))
+K_selected <- array(NA,dim = c(3,4,n_rep))
+
 sparsity_levels <- c(.25,.5,.75)
 for(replicate in 1:n_rep){
   ##### Parameters that may need to be varied for simulation experiments #####
-  
-  N <- 100
   K_true <- 2
   lambda_l <- .4*rep(1,K_true)
   lambda_scale <- 1*rep(1,K_true)
   mu_l <- .4
   mu_scale <- 1
-  sig_true <- .5 # low noise setting
-  # sig_true <- 1 # high noise setting
-  
+  if(noise_setting == "low"){sig_true <- .5}
+  if(noise_setting == "high"){sig_true <- 1}
   
   ##### generate underlying observations #####
   
@@ -56,7 +72,20 @@ for(replicate in 1:n_rep){
     }
   }
   
-  eta_true <- matrix(rnorm(K_true*N),nrow = K_true,ncol = N)
+  nu_eta <- 1e-4
+  eta_cov <- diag(one_N) - one_N%*%t(one_N)/(nu_eta + N)
+  eta_true <- mvrnorm(K_true,mu = rep(0,N),Sigma = eta_cov)
+  eta_sd <- sqrt(apply(eta_true,1,var))
+  
+  lambda_true <- lambda_true*(one_M%*%t(eta_sd))
+  eta_true <- eta_true/(eta_sd%*%t(one_N))
+  
+  lambda_norm <- sqrt(diag(t(lambda_true)%*%W%*%lambda_true))
+  lambda_true <- lambda_true*(one_M%*%t(c(1.5,.75)/lambda_norm))
+  
+  lambda_norm_order <- order(lambda_norm,decreasing = T)
+  lambda_true <- lambda_true[,lambda_norm_order]
+  eta_true <- eta_true[lambda_norm_order,]
   
   f <- mu_true%*%t(rep(1,N)) + lambda_true%*%eta_true
   noise <- matrix(rnorm(N*M,0,sig_true),nrow = M,ncol = N)
@@ -86,102 +115,75 @@ for(replicate in 1:n_rep){
     y_long_count <- y_long_count + 1
     
     ##### run nemo ffa #####
-    w <- diff(c(time[1],(time[2:M]+time[1:(M-1)])/2,time[M]))
-    W <- diag(w)
-    one_vec_N <- rep(1,N)
-    K <- 5
+    K_max <- 5
     nu_eta <- 1e-4
-    nu_param <- 1e-4
+    nu_lambda <- 1e-4
     
-    lambda_cur <- matrix(rnorm(M*K),nrow = M,ncol = K)
-    eta_cur <- matrix(rnorm(K*N,0,1),nrow = K,ncol = N)
-    psi_cur <- rep(1,K)
-    sig_sq_cur <- var((y-lambda_cur%*%eta_cur)[obs_grid>0])
-    l_mu_current <- .1
-    scale_mu_current <- 1
-    l_param_cur <- rep(.1,K)
-    scale_param_cur <- rep(1,K)
-    
-    prior_a <- 12
-    prior_b <- 4
+    inv_g_hyper <- length_scale_hyper(time)
+    prior_a <- inv_g_hyper[1]
+    prior_b <- inv_g_hyper[2]
     prior_var <- 1
-    
-    px_b <- 1
-    px_a <- px_b + 1
-    
-    # pre-specify proposal kernel parameters
-    proposal_l_mu <- .0001
-    proposal_scale_mu <- .0001
-    proposal_l <- rep(.001,K)
-    proposal_scale <- rep(.001,K)
-    accept_l_mu_count <- 0
-    accept_scale_mu_count <- 0
-    accept_l_count <- rep(0,K)
-    accept_scale_count <- rep(0,K)
-    
-    # pre-allocate memory for MCMC samples
     n_iter <- 1000
-    mu_save <- matrix(0,nrow = M,ncol = n_iter)
-    scale_mu_save <- rep(0,n_iter)
-    l_mu_save <- rep(0,n_iter)
-    lambda_save <- array(0,dim = c(M,K,n_iter))
-    eta_save <- array(0,dim = c(K,N,n_iter))
-    psi_save <- array(0,dim = c(K,n_iter))
-    l_param_save <- array(0,dim = c(K,n_iter))
-    scale_param_save <- array(0,dim = c(K,n_iter))
-    sig_sq_save <- rep(0,n_iter)
+    init_mcmc_params <- init_ffa_mcmc(y_common,obs_grid,time,
+                                      K_max,nu_eta,nu_lambda,
+                                      prior_a,prior_b,prior_var,
+                                      n_iter)
+    lag <- 1
     
-    for(iter in 1:n_iter){
+    ffa_mcmc <- run_ffa_mcmc(y_common,obs_grid,time,
+                             nu_eta,nu_lambda,
+                             init_mcmc_params,
+                             prior_a,prior_b,prior_var,
+                             n_iter,lag)
+    
+    K_selected[sparsity_ind,1,replicate] <- dim(init_mcmc_params$eta_cur)[1]
+    
+    # compute mu MISE
+    mu_post_mean <- apply(ffa_mcmc$mu_save,1,mean)
+    mu_MISE_nemo <- diag(t(mu_true - mu_post_mean)%*%W%*%(mu_true - mu_post_mean))
+    
+    # compute lambda MISE
+    # resolve label switching an sign ambiguity
+    lambda_save_processed <- ffa_mcmc$lambda_save
+    for(iter in 1:dim(lambda_save_processed)[3]){
+      lambda_post <- ffa_mcmc$lambda_save[,,iter]*(one_M%*%t(sqrt(ffa_mcmc$psi_save[,iter])))
+      eta_post <- ffa_mcmc$eta_save[,,iter]/(sqrt(ffa_mcmc$psi_save[,iter])%*%t(one_N))
+      eta_sd <- sqrt(apply(eta_post,1,var))
       
-      y_st_cur <- compute_y_st(y_common,lambda_cur%*%eta_cur,obs_grid)
-      mu_cur <- sample_mu_sparse(y_st_cur, sig_sq_cur, time, l_mu_current,scale_mu_current,obs_grid)
+      lambda_post <- lambda_post*(one_M%*%t(eta_sd))
+      eta_post <- eta_post/(eta_sd%*%t(one_N))
       
-      out <- l_mu_MH(y_st_cur,time,obs_grid,l_mu_current,scale_mu_current,mu_cur,sig_sq_cur,proposal_l_mu,1,iter,prior_a,prior_b) 
-      l_mu_current <- out[1]
-      accept_l_mu_count <- accept_l_mu_count + out[2]
-      proposal_l_mu <- out[3]
-      
-      out <- scale_mu_MH(y_st_cur, time,obs_grid,l_mu_current, scale_mu_current,mu_cur,sig_sq_cur,proposal_scale_mu,1,iter,prior_var)
-      scale_mu_current<- out[1]
-      accept_scale_mu_count <- accept_scale_mu_count + out[2]
-      proposal_scale_mu<- out[3]
-      
-      y_st_cur <- compute_y_st(y_common,mu_cur%*%t(one_vec_N),obs_grid)
-      lambda_cur <- sample_lambda_sparse(y_st_cur,W,time,l_param_cur,scale_param_cur,lambda_cur,eta_cur,sig_sq_cur,nu_param,obs_grid)
-      
-      out <- l_param_MH(l_param_cur,proposal_l,scale_param_cur,time,obs_grid,W,y_st_cur,lambda_cur,eta_cur,sig_sq_cur,nu_param,1,iter,prior_a,prior_b)
-      l_param_cur <- out[,1]
-      accept_l_count <- accept_l_count + out[,2]
-      proposal_l <- out[,3]
-      
-      out <- scale_param_MH(scale_param_cur,proposal_scale,l_param_cur,time,obs_grid,W,y_st_cur,lambda_cur,eta_cur,sig_sq_cur,nu_param,1,iter,prior_var)
-      scale_param_cur <- out[,1]
-      accept_scale_count <- accept_scale_count + out[,2]
-      proposal_scale <- out[,3]
-      
-      eta_cur <- sample_eta_sparse(y_st_cur,eta_cur,psi_cur,lambda_cur,sig_sq_cur,nu_eta,obs_grid)
-      psi_cur <- sample_psi_sparse(eta_cur,nu_eta,px_a,px_b)
-      
-      sig_sq_cur <- sample_sig_sq_sparse(y_st_cur,lambda_cur,eta_cur,obs_grid)
-      
-      mu_save[,iter] <- mu_cur
-      scale_mu_save[iter] <- scale_mu_current
-      l_mu_save[iter] <- l_mu_current
-      lambda_save[,,iter] <- lambda_cur
-      eta_save[,,iter] <- eta_cur
-      psi_save[,iter] <- psi_cur
-      l_param_save[,iter] <- l_param_cur
-      scale_param_save[,iter] <- scale_param_cur
-      sig_sq_save[iter] <- sig_sq_cur
-      
+      perm_out <- msfOUT_functional(lambda_post,W,lambda_true)
+      lambda_save_processed[,,iter] <- aplr(lambda_post,perm_out)
+    }
+    lambda_post_mean <- apply(lambda_save_processed,c(1,2),mean)
+    if(dim(lambda_post_mean)[2]<K_true){
+      lambda_post_mean <- cbind(lambda_post_mean,
+                                t(repmat(rep(0,M),K_true - dim(lambda_post_mean)[2]) ))
     }
     
+    lambda_MISE_nemo <- diag(t(lambda_true - lambda_post_mean)%*%W%*%(lambda_true - lambda_post_mean))
+    
+    # overall fit
     fit_save <- array(0,dim = c(M,N,n_iter/2))
     for(iter in (n_iter/2 + 1):n_iter){
-      fit_save[,,iter - n_iter/2] <- mu_save[,iter]%*%t(one_vec_N) + lambda_save[,,iter]%*%eta_save[,,iter]
+      if(K_selected[sparsity_ind,1,replicate] == 1){
+        fit_save[,,iter - n_iter/2] <- ffa_mcmc$mu_save[,iter]%*%t(one_N) + ffa_mcmc$lambda_save[,,iter]%*%t(ffa_mcmc$eta_save[,,iter])
+      }else{
+        fit_save[,,iter - n_iter/2] <- ffa_mcmc$mu_save[,iter]%*%t(one_N) + ffa_mcmc$lambda_save[,,iter]%*%ffa_mcmc$eta_save[,,iter]
+      }
+      
     }
     fit_mean <- apply(fit_save,c(1,2),mean)
     MISE <- diag(t(fit_mean - f)%*%W%*%(fit_mean - f))
+    
+    # store estimated quantities
+
+    mu_MISE[sparsity_ind,1,replicate] <- mu_MISE_nemo
+    lambda_1_MISE[sparsity_ind,1,replicate] <- lambda_MISE_nemo[1]
+    lambda_2_MISE[sparsity_ind,1,replicate] <- lambda_MISE_nemo[2]
+    
+    
     
     ##### Run PACE #####
     
@@ -195,8 +197,7 @@ for(replicate in 1:n_rep){
     
     pace_options <- list()
     pace_options$dataType <- 'Sparse'
-    pace_options$plot <- TRUE
-    pace_options$methodSelectK <- 5
+    pace_options$maxK <- 5
     
     pace_results <- FPCA(Ly,Lt,optns = pace_options)
     
@@ -212,65 +213,73 @@ for(replicate in 1:n_rep){
       phi = pace_results$phi
     )
     
-    fit_pace <- mu_obs_grid%*%t(one_vec_N) + phi_obs_grid%*%t(pace_results$xiEst)
+    # compute mu MISE
+    mu_MISE_pace <- diag(t(mu_true - mu_obs_grid)%*%W%*%(mu_true - mu_obs_grid))
+    
+    # compute lambda MISE
+    eta_sd <- sqrt(apply(pace_results$xiEst,2,var))
+    lambda_post <- phi_obs_grid*(one_M%*%t(eta_sd))
+    if(pace_results$selectK > K_true){
+      lambda_post <- lambda_post[,1:K_true]
+    }
+    perm_out <- msfOUT_functional(lambda_post,W,lambda_true)
+    lambda_post <- aplr(lambda_post,perm_out)
+    lambda_MISE_pace <- diag(t(lambda_true - lambda_post)%*%W%*%(lambda_true - lambda_post))
+    
+    # overall fit
+    fit_pace <- mu_obs_grid%*%t(one_N) + phi_obs_grid%*%t(pace_results$xiEst)
     
     MISE_pace <- diag(t(fit_pace - f)%*%W%*%(fit_pace - f))
     
+    # store estimated quantities
+    K_selected[sparsity_ind,2,replicate] <- pace_results$selectK
+    mu_MISE[sparsity_ind,2,replicate] <- mu_MISE_pace
+    lambda_1_MISE[sparsity_ind,2,replicate] <- lambda_MISE_pace[1]
+    lambda_2_MISE[sparsity_ind,2,replicate] <- lambda_MISE_pace[2]
     
     ##### Peng and Paul FPCA #####
-    tryCatch({ # There  sometimes when this code throws an error
-      fpca_data <- cbind(y_long[,1],y_long[,3],y_long[,2]/2)
-      fpca_results <- fpca.mle(fpca_data,c(5,10,15,20),5)
-      
-      fpca.score2 <- function(data.m, grids.u, muhat, eigenvals, eigenfuncs, sig2hat,K) 
-      {
-        temp <- table(data.m[, 1])
-        n <- length(temp)
-        m.l <- as.vector(temp)
-        result <- matrix(0, n, K)
-        N <- length(grids.u)
-        evalmat <- diag(eigenvals[1:K])
-        current <- 0
-        eigenfuncs.u <- t(eigenfuncs)
-        data.u <- matrix(as.numeric(as.vector(data.m[, -1])), nrow = nrow(data.m[, 
-                                                                                 -1]), ncol = ncol(data.m[, -1]))
-        for (i in 1:n) {
-          Y <- as.vector(data.u[(current + 1):(current + m.l[i]), 
-                                1])
-          meastime <- data.u[(current + 1):(current + m.l[i]), 
-                             2]
-          gridtime <- ceiling(N * meastime) 
-          gridtime[gridtime == 0] <- 1 # there is an off by 1 error in the R package
-          muy <- muhat[gridtime]
-          Phiy <- matrix(eigenfuncs.u[gridtime, 1:K], ncol = K)
-          Sigy <- Phiy %*% evalmat %*% t(Phiy) + sig2hat * diag(m.l[i])
-          temp.y <- matrix(Y - muy)
-          result[i, ] <- evalmat %*% t(Phiy) %*% solve(Sigy, temp.y)
-          current <- current + m.l[i]
-        }
-        return(result)
-      }
-      
-      fpca_scores <- fpca.score2(fpca_data,fpca_results$grid,fpca_results$fitted_mean,
-                                 fpca_results$eigenvalues,fpca_results$eigenfunctions,fpca_results$error_var,5)
-      fit_fpca_dense <- fpca_results$fitted_mean%*%t(rep(1,N)) + t(fpca_results$eigenfunctions)%*%t(fpca_scores)
-      
-      fit_fpca_og <- array(0,dim = c(M,N))
-      for(i in 1:N){
-        fit_fpca_og[,i] <- approx(x = fpca_results$grid,fit_fpca_dense[,i],xout = time/2)$y
-      }
-      
-      MISE_fpca <- diag(t(fit_fpca_og - f)%*%W%*%(fit_fpca_og - f))
-      MISE_mat[sparsity_ind,2,replicate] <- mean(MISE_fpca)
-    },error = function(cond){
-      MISE_mat[sparsity_ind,2,replicate] <- NA
-    })
+    fpca_data <- cbind(y_long[,1],y_long[,3],y_long[,2]/2)
+    fpca_results <- fpca.mle(fpca_data,c(5,10,15,20),2:5)
+    fpca_scores <- fpca.score2(fpca_data,fpca_results$grid,fpca_results$fitted_mean,
+                               fpca_results$eigenvalues,fpca_results$eigenfunctions,fpca_results$error_var,fpca_results$selected_model[2])
+    mu_dense <- fpca_results$fitted_mean
+    lambda_dense <- fpca_results$eigenfunctions
+    
+    mu_og_grid <- approx(x = fpca_results$grid,mu_dense,xout = time/2)$y
+    lambda_og_grid <- array(0,dim = c(length(mu_og_grid),fpca_results$selected_model[2]))
+    for(k in 1:fpca_results$selected_model[2]){
+      lambda_og_grid[,k] <- approx(x = fpca_results$grid,lambda_dense[k,],xout = time/2)$y
+    }
+    
+    fit_fpca_dense <- fpca_results$fitted_mean%*%t(rep(1,N)) + t(fpca_results$eigenfunctions)%*%t(fpca_scores)
+    
+    fit_fpca_og <- array(0,dim = c(M,N))
+    for(i in 1:N){
+      fit_fpca_og[,i] <- approx(x = fpca_results$grid,fit_fpca_dense[,i],xout = time/2)$y
+    }
+    
+    MISE_fpca <- diag(t(fit_fpca_og - f)%*%W%*%(fit_fpca_og - f))
+
+    # compute mu MISE
+    mu_MISE_fpca <- diag(t(mu_true - mu_og_grid)%*%W%*%(mu_true - mu_og_grid))
+    
+    # compute lambda MISE
+    eta_sd <- sqrt(apply(fpca_scores,2,var))
+    lambda_post <- lambda_og_grid*(one_M%*%t(eta_sd))
+    if(fpca_results$selected_model[2] > K_true){
+      lambda_post <- lambda_post[,1:K_true]
+    }
+    perm_out <- msfOUT_functional(lambda_post,W,lambda_true)
+    lambda_post <- aplr(lambda_post,perm_out)
+    lambda_MISE_fpca <- diag(t(lambda_true - lambda_post)%*%W%*%(lambda_true - lambda_post))
+    
+    # store estimated quantities
+    K_selected[sparsity_ind,3,replicate] <- fpca_results$selected_model[2]
+    mu_MISE[sparsity_ind,3,replicate] <- mu_MISE_fpca
+    lambda_1_MISE[sparsity_ind,3,replicate] <- lambda_MISE_fpca[1]
+    lambda_2_MISE[sparsity_ind,3,replicate] <- lambda_MISE_fpca[2]
     
     ##### Run GC model using WinBUGS #####
-    
-    time_grid<- time
-    grid_weight <- diff(c(time_grid[1],(time_grid[2:M]+time_grid[1:(M-1)])/2,time_grid[M]))
-    grid_weight <- diag(grid_weight)
     
     y <- as.matrix(dcast(as.data.frame(y_long),id_temp~t_temp,value.var = "y_temp"))
     y <- y[,2:31]
@@ -278,14 +287,13 @@ for(replicate in 1:n_rep){
     # set variables for WinBUGS
     N_subj=dim(y)[1]
     N_obs=dim(y)[2]
-    dim.space=5
+    dim.space=2
     
-    # W is y - mean(y) 
-    W=y
-    W<-W-matrix(rep(colMeans(W,na.rm=TRUE),nrow(W)),nrow=nrow(W),byrow=TRUE)
+    y_centered=y
+    y_centered<-y_centered-matrix(rep(colMeans(y_centered,na.rm=TRUE),nrow(y_centered)),nrow=nrow(y_centered),byrow=TRUE)
     
     # Estimate covariance function through bivaraite smoothing
-    Gt=cov(W,use="pairwise.complete.obs")
+    Gt=cov(y_centered,use="pairwise.complete.obs")
     gw.temp <- Gt
     diag(gw.temp) <- rep(NA, length(diag(Gt)))
     
@@ -312,18 +320,21 @@ for(replicate in 1:n_rep){
     #Obtain the eigenvectors of Gt up to the dim.space
     E=(eigen(sm_Gt)$vectors[1:N_obs,1:dim.space])
     
+    perm_out <- msfOUT_functional(E,W,lambda_true)
+    E <- aplr(E,perm_out)
+    
     ##### MCMC Using WinBUGS #####
-    data<-list("E","W","N_subj","N_obs","dim.space")
+    data<-list("E","y_centered","N_subj","N_obs","dim.space")
     
     #This is the name of the program
     program.file.name="wb_model.txt"
     
     #Define the initial values & parameters to record 
-    inits.W=matrix(rep(NA,N_subj*N_obs),ncol=N_obs)
+    inits.y_centered=matrix(rep(NA,N_subj*N_obs),ncol=N_obs)
     inits.ll=rep(0.01,dim.space)
-    inits.W[is.na(W)]=mean(mean(W,na.rm=TRUE))
+    inits.y_centered[is.na(y_centered)]=mean(mean(y_centered,na.rm=TRUE))
     inits<-function(){list(xi=matrix(rep(0,N_subj*dim.space),ncol=dim.space),
-                           taueps=0.01,ll=inits.ll,W=inits.W)}
+                           taueps=0.01,ll=inits.ll,y_centered=inits.y_centered)}
     
     parameters=list("lambda","xi")
     
@@ -331,46 +342,123 @@ for(replicate in 1:n_rep){
     n.thin=1
     n.iter=1500
     n.burnin=500
-    
-    
-    library(R2WinBUGS)
+
     Bayes.fit<- bugs(data, inits, parameters, model.file = program.file.name,
                      n.chains = 1, n.iter = n.iter, n.burnin = n.burnin,
                      n.thin = n.thin,debug = FALSE, DIC = FALSE, digits = 5, codaPkg = FALSE,
                      bugs.directory = "c:/Program Files/WinBUGS14/")
     
-    
+    # compute mu MISE
     y_mean=colMeans(y[1:N_subj,1:N_obs],na.rm=TRUE)
+    mu_MISE_cg <- diag(t(mu_true - y_mean)%*%W%*%(mu_true - y_mean))
+    
+    # compute lambda MISE
+    eta_post_mean <- Bayes.fit$mean$xi
+    eta_sd <- sqrt(apply(eta_post_mean,2,var))
+    lambda_post <- E*(one_M%*%t(eta_sd))
+    perm_out <- msfOUT_functional(lambda_post,W,lambda_true)
+    lambda_post <- aplr(lambda_post,perm_out)
+    lambda_MISE_cg <- diag(t(lambda_true - lambda_post)%*%W%*%(lambda_true - lambda_post))
+    
+    # store estimated quantities
+    K_selected[sparsity_ind,4,replicate] <- 2
+    mu_MISE[sparsity_ind,4,replicate] <- mu_MISE_cg
+    lambda_1_MISE[sparsity_ind,4,replicate] <- lambda_MISE_cg[1]
+    lambda_2_MISE[sparsity_ind,4,replicate] <- lambda_MISE_cg[2]
+    
+    #overall fit
     wb_fit <- t(Bayes.fit$mean$xi%*%t(E) + rep(1,dim(Bayes.fit$mean$xi)[1])%*%t(y_mean))
+    wb_MISE <- diag(t(wb_fit - f)%*%W%*%(wb_fit - f))
     
-    wb_MISE <- diag(t(wb_fit - f)%*%grid_weight%*%(wb_fit - f))
-    
-    MISE_mat[sparsity_ind,1,replicate] <- mean(MISE)
-    MISE_mat[sparsity_ind,3,replicate] <- mean(MISE_pace)
-    MISE_mat[sparsity_ind,4,replicate] <- mean(wb_MISE)
+    est_MISE[sparsity_ind,1,replicate] <- mean(MISE)
+    est_MISE[sparsity_ind,2,replicate] <- mean(MISE_pace)
+    est_MISE[sparsity_ind,3,replicate] <- mean(MISE_fpca)
+    est_MISE[sparsity_ind,4,replicate] <- mean(wb_MISE)
     
   }
   
-  print(replicate)
-  print(MISE_mat[,,replicate])
-  
+  print(K_selected[,,replicate])
+  print(mu_MISE[,,replicate])
+  print(lambda_1_MISE[,,replicate])
+  print(lambda_2_MISE[,,replicate])
+  print(est_MISE[,,replicate])
 }
+
+
 
 ##### Visualize results #####
 
-MISE_mean <- apply(MISE_mat,c(1,2),mean)
-MISE_sd <- apply(MISE_mat,c(1,2),sd)
-MISE_lower<- MISE_mean - 1.96*MISE_sd/sqrt(dim(MISE_mat)[3])
-MISE_upper<- MISE_mean + 1.96*MISE_sd/sqrt(dim(MISE_mat)[3])
 
-method_fact <- factor(c(rep("ReMO",3),rep("Newton",3),rep("PACE",3),rep("CG",3)),levels = c("ReMO","Newton","PACE","CG"))
-mean_df = data.frame(method = method_fact,value = c(MISE_mean))
-lower_df = data.frame(method = method_fact,value = c(MISE_lower))
-upper_df = data.frame(method = method_fact,value = c(MISE_upper))
+# accidentally saved incorrectly, so resolving manuyally
+pace_MISE <- est_MISE[sparsity_ind,3,replicate]
+fpca_MISE <- est_MISE[sparsity_ind,2,replicate]
 
-sparsity_levels <- c(.25,.5,.75)
-yl <- c(min(MISE_lower),max(MISE_upper))
-ggplot(mean_df) + geom_line(aes(x = rep(sparsity_levels,4),y = value,color = method),size = 2) + 
-  geom_ribbon(mapping = aes(x = rep(sparsity_levels,4),ymin = lower_df$value,ymax = upper_df$value ,fill = method),alpha = .2) + 
-  ylab("MISE") + xlab("sparsity level") + ylim(yl) + theme(text = element_text(size = 24)) +
-  scale_x_continuous(breaks = sparsity_levels)
+est_MISE[sparsity_ind,3,replicate] <- fpca_MISE
+est_MISE[sparsity_ind,3,replicate] <- pace_MISE
+
+cube_diff <- function(cube_array){
+diff_array <- array(0,dim= c(3,3,100))
+for(method in 1:3){
+  diff_array[,method,] <- cube_array[,1+method,] - cube_array[,1,]
+}
+return(diff_array)
+}
+
+reorg_results <- function(cube_array){
+s_levels <- c(.25,.5,.75)
+m_levels <- c("YMW2005","PP2009","CG2010")
+long_rep <- NULL
+long_s <- NULL
+long_m <- NULL
+long_value <- NULL
+for(s_ind in 1:3){
+  for(m_ind in 1:3){
+    long_rep <- c(long_rep,1:100)
+    long_s <- c(long_s,rep(s_levels[s_ind],100))
+    long_m <- c(long_m,rep(m_levels[m_ind],100))
+    long_value <- c(long_value,cube_array[s_ind,m_ind,])
+  }
+}
+long_df <- data.frame(replicate = long_rep,sparsity = long_s,method = long_m,value = long_value)
+return(long_df)
+}
+
+temp_df <- reorg_results(cube_diff(mu_MISE))
+scale_breaks <- round(seq(0,quantile(temp_df$value, c(0.95)),length.out = 4),2)
+scale_labels <- as.character(scale_breaks)  
+scale_labels[1] <- "NeMO"
+
+p1 <- ggplot(temp_df) + geom_boxplot(aes(x = as.factor(sparsity),y = value,color = method),outlier.shape = NA) +
+  scale_y_continuous(limits = c(0,quantile(temp_df$value, c(0.95))),breaks = scale_breaks,labels = scale_labels) +
+  geom_hline(yintercept = 0,linetype = "dashed",size = 1)+ ylab("") + xlab("") + theme(text = element_text(size = 24)) + ggtitle(expression(mu))
+
+temp_df <- reorg_results(cube_diff(lambda_1_MISE))
+scale_breaks <- round(seq(0,quantile(temp_df$value, c(0.95)),length.out = 4),2)
+scale_labels <- as.character(scale_breaks)  
+scale_labels[1] <- "NeMO"
+
+p2 <- ggplot(temp_df) + geom_boxplot(aes(x = as.factor(sparsity),y = value,color = method),outlier.shape = NA) +
+  scale_y_continuous(limits = c(0,quantile(temp_df$value, c(0.95))),breaks = scale_breaks,labels = scale_labels) +
+  geom_hline(yintercept = 0,linetype = "dashed",size = 1)+ ylab("") + xlab("") + theme(text = element_text(size = 24)) + ggtitle(expression(lambda[1]))
+
+temp_df <- reorg_results(cube_diff(lambda_2_MISE))
+scale_breaks <- round(seq(0,quantile(temp_df$value, c(0.95)),length.out = 4),2)
+scale_labels <- as.character(scale_breaks)  
+scale_labels[1] <- "NeMO"
+
+p3 <- ggplot(temp_df) + geom_boxplot(aes(x = as.factor(sparsity),y = value,color = method),outlier.shape = NA) +
+  scale_y_continuous(limits = c(0,quantile(temp_df$value, c(0.95))),breaks = scale_breaks,labels = scale_labels) +
+  geom_hline(yintercept = 0,linetype = "dashed",size = 1)+ ylab("") + xlab("") + theme(text = element_text(size = 24)) + ggtitle(expression(lambda[2]))
+
+temp_df <- reorg_results(cube_diff(est_MISE))
+scale_breaks <- round(seq(0,quantile(temp_df$value, c(0.95)),length.out = 4),2)
+scale_labels <- as.character(scale_breaks)  
+scale_labels[1] <- "NeMO"
+
+p4 <- ggplot(temp_df) + geom_boxplot(aes(x = as.factor(sparsity),y = value,color = method),outlier.shape = NA) +
+  scale_y_continuous(limits = c(0,quantile(temp_df$value, c(0.95))),breaks = scale_breaks,labels = scale_labels) +
+  geom_hline(yintercept = 0,linetype = "dashed",size = 1)+ ylab("") + xlab("") + theme(text = element_text(size = 24)) + ggtitle("f")
+
+common_plot <- ggarrange(p1,p2,p3,p4,common.legend = TRUE,ncol = 4, legend = "right")
+annotate_figure(common_plot, left = textGrob("MISE", rot = 90, vjust = 1, gp = gpar(cex = 2)),
+                bottom = textGrob("sparsity level", gp = gpar(cex = 2)))
