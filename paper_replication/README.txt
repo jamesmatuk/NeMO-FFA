@@ -7,6 +7,14 @@ and discuss replication workflow.
 
  file descriptions:
 
+  cebu_bffa_select_K.R - This script imports data from the /data directory and runs an overfitted
+factor model to the breastfeeding covariates in order to select the dimension of the latent space
+according to Section 3.4 in the main paper.
+
+  cebu_bffa_select_K.R - This script imports data from the /data directory and runs an overfitted
+factor model to the weight measurements in order to select the dimension of the latent space
+according to Section 3.4 in the main paper.
+
   cebu_mcmc.R - This script imports data from the /data directory and runs the MCMC algorithm to 
 replicate the results in Section 5 of the main paper.
 
